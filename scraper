@@ -1,0 +1,560 @@
+// Google Apps Script - Complete Updated Code
+// Copy and paste this entire code into your Apps Script editor
+
+const SHEET_ID = '1c6zsSEnOYoI7VYrOcPHytvE6jpfeLAY0rLL4JFn1Bjg';
+const SHEET_NAME = 'Captain_Deals_Deal_Input';
+const HEADERS = [
+  'Date Added',
+  'ASIN',
+  'Product Title',
+  'Original Price',
+  'Sale Price',
+  'Discount %',
+  'Coupon %',
+  'Promo Price with Coupon',
+  'Category',
+  'Amazon URL',
+  'Amazon Affiliate Short',
+  'Linkt.w Deep Link',
+  'Product Description',
+  'Main Image URL',
+  'Promo text',
+  'First Comment'
+];
+const BRAND_FILE_ID = 'file-AxT4rSYxj5TY2X43dRoRHY'; // Your uploaded brand guideline file
+// Available models: gpt-5 (latest), gpt-4o, gpt-4o-mini, gpt-4-turbo
+const OPENAI_MODEL = 'gpt-4.1-mini'; // Using GPT-5 (latest). Options: 'gpt-5', 'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'
+const DRIVE_FOLDER_ID = '1xQSefZCruHl9rIfJO5wcmhAlQlY1uT9V'; // Folder to store product images
+
+/**
+ * Create a shortened link using Linkt.w API
+ * API key/token should be stored in Script Properties as 'LINKTW_API_KEY'
+ * API endpoint can be configured - default assumes standard REST API pattern
+ */
+function createLinktShortLink(longUrl) {
+  if (!longUrl || !longUrl.trim()) {
+    console.warn('createLinktShortLink: No URL provided');
+    return '';
+  }
+  
+  try {
+    // Get API key from Script Properties
+    const apiKey = PropertiesService.getScriptProperties().getProperty('LINKTW_API_KEY');
+    if (!apiKey) {
+      console.error('LINKTW_API_KEY not found in Script Properties. Please add it in Project Settings > Script Properties.');
+      return '';
+    }
+    
+    console.log('Creating Linkt.w short link for:', longUrl);
+    
+    // Linkt.w API endpoint
+    const apiUrl = 'https://linktw.in/api/url/add';
+    
+    const payload = {
+      url: longUrl.trim(),
+      // Add other optional parameters if your API supports them:
+      // domain: 'linktw.in',
+      // customAlias: '',
+      // expiresAt: ''
+    };
+    
+    const options = {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        'Authorization': 'Bearer ' + apiKey,
+        'Content-Type': 'application/json'
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    };
+    
+    const response = UrlFetchApp.fetch(apiUrl, options);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+    
+    console.log('Linkt.w API response code:', responseCode);
+    console.log('Linkt.w API response:', responseText);
+    
+    if (responseCode >= 200 && responseCode < 300) {
+      let json;
+      try {
+        json = JSON.parse(responseText);
+      } catch (parseErr) {
+        console.error('Failed to parse Linkt.w API response as JSON:', responseText);
+        return '';
+      }
+      
+      // Check for API-level errors (error: 0 = success, error: 1 = failure)
+      if (json.error === 1 || json.error === '1') {
+        const errorMsg = json.message || 'Unknown error from Linkt.w API';
+        console.error('Linkt.w API returned error:', errorMsg);
+        return '';
+      }
+      
+      // Extract the short URL from response
+      // Response format: { "error": 0, "id": 3, "shorturl": "https://linktw.in/google" }
+      // Also check for alternative response formats
+      const shortUrl = json.shorturl || json.shortUrl || json.data?.shorturl || json.data?.shortUrl || json.url || '';
+      if (shortUrl) {
+        console.log('✅ Linkt.w short link created successfully:', shortUrl);
+        return shortUrl;
+      } else {
+        console.error('❌ Linkt.w API response did not contain short URL. Full response:', JSON.stringify(json));
+        return '';
+      }
+    } else {
+      console.error('❌ Linkt.w API HTTP error:', responseCode, responseText);
+      return '';
+    }
+  } catch (err) {
+    console.error('❌ Exception in createLinktShortLink:', err.toString(), err.stack);
+    return '';
+  }
+}
+
+/**
+ * Save a remote image to Drive and return its shareable URL
+ */
+function saveImageToDrive(imageUrl, asin) {
+  if (!imageUrl) return '';
+  try {
+    const response = UrlFetchApp.fetch(imageUrl, { muteHttpExceptions: true, followRedirects: true });
+    const status = response.getResponseCode();
+    if (status < 200 || status >= 300) {
+      throw new Error('Image fetch failed with status ' + status);
+    }
+    let blob = response.getBlob();
+    const contentType = blob.getContentType() || 'image/jpeg';
+    const extensionMatch = contentType.match(/image\/([a-zA-Z0-9]+)/);
+    const extension = extensionMatch ? '.' + extensionMatch[1] : '.jpg';
+    const sanitizedAsin = asin ? asin.replace(/[^A-Za-z0-9_-]/g, '') : 'product';
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `${sanitizedAsin}_${timestamp}${extension}`;
+    const folder = (DRIVE_FOLDER_ID && DRIVE_FOLDER_ID.trim())
+      ? DriveApp.getFolderById(DRIVE_FOLDER_ID.trim())
+      : DriveApp.getRootFolder();
+    blob = blob.setName(filename);
+    const file = folder.createFile(blob);
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    return file.getUrl();
+  } catch (err) {
+    console.error('saveImageToDrive error:', err);
+    return imageUrl; // fall back to original URL if save fails
+  }
+}
+
+/**
+ * Main handler for POST requests from Chrome extension
+ */
+function doPost(e) {
+  try {
+    if (!e || !e.postData || !e.postData.contents) {
+      return _json({ ok: false, error: 'No body received' }, 400);
+    }
+
+    const body = JSON.parse(e.postData.contents);
+    console.log('Received payload:', body);
+
+    // Open the spreadsheet
+    const ss = SpreadsheetApp.openById(SHEET_ID);
+    const sh = ss.getSheetByName(SHEET_NAME) || ss.getSheets()[0];
+    if (!sh) {
+      return _json({ ok: false, error: 'Sheet "' + SHEET_NAME + '" not found' }, 404);
+    }
+
+    // Ensure header row exists
+    const range = sh.getRange(1, 1, 1, HEADERS.length);
+    const firstRow = range.getValues()[0];
+    const hasHeaders = firstRow.some(v => v && String(v).trim() !== '');
+    if (!hasHeaders) {
+      range.setValues([HEADERS]);
+    }
+
+    // Calculate coupon percent from original price and selling price (stored in couponAmount)
+    let calculatedCouponPercent = '';
+    if (body.couponAmount && body.originalPrice) {
+      try {
+        const original = parseFloat(String(body.originalPrice).replace(/[^0-9.]/g, ''));
+        const sellingPrice = parseFloat(String(body.couponAmount).replace(/[^0-9.]/g, ''));
+        if (isFinite(original) && isFinite(sellingPrice) && original > 0 && sellingPrice < original) {
+          // Calculate coupon percent: ((original - sellingPrice) / original) * 100
+          // But we need to account for the base discount first
+          const salePrice = body.salePrice ? parseFloat(String(body.salePrice).replace(/[^0-9.]/g, '')) : null;
+          if (salePrice && isFinite(salePrice) && salePrice < original) {
+            // If we have salePrice, coupon is the additional discount from salePrice to sellingPrice
+            calculatedCouponPercent = Math.round(((salePrice - sellingPrice) / salePrice) * 100);
+          } else {
+            // Otherwise, calculate total discount and subtract base discount
+            const totalDiscount = ((original - sellingPrice) / original) * 100;
+            const baseDiscount = parseFloat(body.discountPercent) || 0;
+            calculatedCouponPercent = Math.round(totalDiscount - baseDiscount);
+          }
+        }
+      } catch (e) {
+        // If calculation fails, use provided couponPercent or empty
+        calculatedCouponPercent = body.couponPercent || '';
+      }
+    } else {
+      calculatedCouponPercent = body.couponPercent || '';
+    }
+
+    // Save image to Drive (if provided)
+    const driveImageUrl = saveImageToDrive(body.mainImageUrl || '', body.asin || '');
+    const imageUrlForSheet = driveImageUrl || body.mainImageUrl || '';
+
+    // Create Linkt.w deep link from Amazon affiliate link (if provided)
+    let finalLinktUrl = '';
+    console.log('Linkt.w link generation - amazonAffiliateShort:', body.amazonAffiliateShort);
+    
+    if (body.amazonAffiliateShort && body.amazonAffiliateShort.trim()) {
+      console.log('Attempting to create Linkt.w deep link from:', body.amazonAffiliateShort);
+      const linktShortUrl = createLinktShortLink(body.amazonAffiliateShort);
+      if (linktShortUrl) {
+        finalLinktUrl = linktShortUrl;
+        console.log('✅ Linkt.w deep link created successfully:', finalLinktUrl);
+      } else {
+        // Fallback to Amazon affiliate link if Linkt.w fails
+        console.warn('⚠️ Linkt.w link creation failed, using Amazon affiliate link as fallback');
+        finalLinktUrl = body.amazonAffiliateShort;
+      }
+    } else {
+      console.warn('⚠️ No Amazon affiliate link provided - Linkt.w column will be empty');
+    }
+    
+    console.log('Final Linkt.w deep link to be saved:', finalLinktUrl);
+
+    // Generate promo text using OpenAI (comment text format only)
+    let promoText = '';
+    let firstComment = '';
+    try {
+      const promoResult = generatePromoText({
+        title: body.title || '',
+        description: body.productDescription || body.description || '',
+        originalPrice: body.originalPrice || body.originalPriceRaw || '',
+        salePrice: body.salePrice || body.salePriceRaw || '',
+        discountPercent: body.discountPercent || '',
+        couponPercent: calculatedCouponPercent,
+        couponAmount: body.couponAmount || '',
+        category: body.category || '',
+        linktUrl: finalLinktUrl // Pass Linkt.w deep link to the generation function
+      });
+      
+      promoText = (promoResult && promoResult.mainPost) || '';
+      firstComment = (promoResult && promoResult.firstComment) || '';
+      
+      console.log('Generated comment text:', promoText);
+      
+      // Replace [Amazon Link] placeholder with actual Linkt.w deep link if present
+      if (finalLinktUrl && finalLinktUrl.trim()) {
+        if (promoText) {
+          promoText = promoText.replace(/\[Amazon Link\]/gi, finalLinktUrl.trim());
+        }
+        if (firstComment) {
+          firstComment = firstComment.replace(/\[Amazon Link\]/gi, finalLinktUrl.trim());
+        }
+      }
+    } catch (promoError) {
+      console.error('Error generating comment text:', promoError);
+      promoText = 'Error generating comment text: ' + promoError.message;
+      firstComment = promoText;
+      // Still try to append Linkt.w link even if generation failed
+      if (finalLinktUrl && finalLinktUrl.trim()) {
+        promoText = promoText + '\n\n👉 Click here to grab your set now: ' + finalLinktUrl.trim() + '\n(𝐀𝐟𝐟𝐢𝐥𝐢𝐚𝐭𝐞𝐝 𝐥𝐢𝐧𝐤)';
+        firstComment = promoText;
+      }
+    }
+
+    // Prepare row data in the correct column order
+    const row = [
+      body.dateAdded || '',
+      body.asin || '',
+      body.title || '',
+      body.originalPrice !== null && body.originalPrice !== undefined ? body.originalPrice : (body.originalPriceRaw || ''),
+      body.salePrice !== null && body.salePrice !== undefined ? body.salePrice : (body.salePriceRaw || ''),
+      body.discountPercent !== null && body.discountPercent !== undefined ? body.discountPercent : '',
+      calculatedCouponPercent !== null && calculatedCouponPercent !== undefined && calculatedCouponPercent !== '' ? calculatedCouponPercent : '',
+      body.couponAmount !== null && body.couponAmount !== undefined ? body.couponAmount : '',
+      body.category || '',
+      body.amazonUrl || body.url || '',
+      body.amazonAffiliateShort || '', // Amazon Affiliate Short link
+      finalLinktUrl || '', // Linkt.w deep link (auto-generated from affiliate link)
+      body.productDescription || body.description || '',
+      imageUrlForSheet,
+      promoText || '',
+      firstComment || ''
+    ];
+
+    // Append row to sheet
+    sh.appendRow(row);
+
+    return _json({ 
+      ok: true, 
+      message: 'Data added successfully', 
+      promoText: promoText,
+      firstComment: firstComment || null
+    });
+  } catch (err) {
+    console.error('doPost error:', err);
+    return _json({ ok: false, error: String(err) }, 500);
+  }
+}
+
+/**
+ * Generate promo text using OpenAI API
+ */
+function generatePromoText(data) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY not found in Script Properties. Please add it in Project Settings > Script Properties.');
+  }
+
+  // Calculate savings amount
+  const saveAmount = computeSavings(data.originalPrice, data.salePrice);
+  
+  // Calculate total discount including coupon
+  let totalDiscount = parseFloat(data.discountPercent) || 0;
+  if (data.couponPercent) {
+    totalDiscount += parseFloat(data.couponPercent);
+  }
+  
+  return generatePostAndComment(data, saveAmount, totalDiscount, apiKey);
+}
+
+/**
+ * Generate both the main post (tagline style) and the detailed first comment
+ */
+function generatePostAndComment(data, saveAmount, totalDiscount, apiKey) {
+  const mainPost = generateMainPost(data, saveAmount, totalDiscount, apiKey);
+  const firstComment = generateDetailedComment(data, saveAmount, totalDiscount, apiKey);
+  return {
+    mainPost: (mainPost || '').trim(),
+    firstComment: (firstComment || '').trim()
+  };
+}
+
+/**
+ * Generate the main post with an exciting tagline (examples provided by user)
+ */
+function generateMainPost(data, saveAmount, totalDiscount, apiKey) {
+  const systemTextMain = 'You are Captain Deals USA, an electric, emoji-loving deal hunter. Create a SHORT Facebook post (max 3 lines) that follows this exact structure:\nLine 1: ATTENTION-GRABBING TAGLINE with one or two words in all caps with emojis before and after (e.g., \"⭐🏆The best power bank!🏆⭐ Small but mighty‼😜\" or \"🛑Alert🛑\"). Combine emojis + hype + brief descriptor.\nLine 2: Highlight the key benefit/discount/price with emojis (e.g., \"20 000mAh, Fast Charging 22.5W⚡ 😱🔥\" or \"43% OFF slushie machine\"). Include price or savings numbers if available.\nLine 3: CTA using either \"SEE DETAILS 👇👇👇\" or \"Link in comments\" (choose whichever fits best based on provided info).\nMake it fun, bold, and irresistible. Do NOT repeat the product title verbatim—be creative.';
+
+  const userTextMain =
+    `Product Title: ${data.title}\n` +
+    `Product Description: ${truncate(data.description, 400)}\n` +
+    `Original Price: $${data.originalPrice}\n` +
+    `Sale Price: $${data.salePrice}\n` +
+    `Discount Percent: ${data.discountPercent}%\n` +
+    (data.couponPercent ? `Coupon Percent: ${data.couponPercent}%\n` : '') +
+    (data.couponAmount ? `Coupon Amount: $${data.couponAmount}\n` : '') +
+    `Total Discount: ${Math.round(totalDiscount)}%\n` +
+    `Category: ${data.category}\n\n` +
+    `Follow the exact 3-line structure described. Mention price or discount in line 2 if it helps.`;
+
+  return callOpenAI(systemTextMain, userTextMain, apiKey);
+}
+
+/**
+ * Generate the detailed first comment with discount, price, features, and link
+ */
+function generateDetailedComment(data, saveAmount, totalDiscount, apiKey) {
+  const systemTextComment = 'You are Captain Deals USA. Write a detailed first comment for a Facebook post using this exact structure:\n\n"Discount : [base discount or total discount]%\n[Second line: highlight extra savings, checkout note, or final price with an emoji (e.g., \"🟢49% OFF At CHECKOUT\" or \"💰 Only $8 today\")]\n\n----------------------------------\n\n[5 bullet points with emojis highlighting key features/benefits, one per line]\n\n----------------------------------\n\n👀 Switch your view to \"All comments\" instead of "Most relevant" to catch all deals.\n\n[Amazon Link]\n(𝐀𝐟𝐟𝐢𝐥𝐢𝐚𝐭𝐞𝐝 𝐥𝐢𝐧𝐤)"\n\nRules:\n- Use the provided pricing/discount info when filling in the first two lines.\n- Bullets must be concise, value-driven, and each start with a relevant emoji.\n- Keep tone energetic but trustworthy.\n- NEVER insert a blank line between the Amazon Link and the (affiliated link) line.';
+
+  const priceLine = data.couponAmount
+    ? `💰 Checkout Price: $${data.couponAmount}`
+    : (data.salePrice ? `💰 Price: $${data.salePrice}` : '');
+  const checkoutNote = (data.couponPercent || data.discountPercent)
+    ? `🟢 ${Math.round(totalDiscount)}% OFF when you stack codes/coupons`
+    : '';
+
+  const userTextComment =
+    `Product: ${data.title}\n` +
+    `Description: ${truncate(data.description, 800)}\n` +
+    `Original Price: $${data.originalPrice}\n` +
+    `Sale Price: $${data.salePrice}\n` +
+    (data.couponAmount ? `Promo Price With Coupon: $${data.couponAmount}\n` : '') +
+    `Discount Percent: ${data.discountPercent}%\n` +
+    `Total Discount (with coupon): ${Math.round(totalDiscount)}%\n` +
+    (data.couponPercent ? `Coupon Percent: ${data.couponPercent}%\n` : '') +
+    (priceLine ? `Price Line to include: ${priceLine}\n` : '') +
+    (checkoutNote ? `Savings Line to include: ${checkoutNote}\n` : '') +
+    `Category: ${data.category}\n\n` +
+    `Write the detailed first comment using the exact template. Replace placeholders with the data above.`;
+
+  return callOpenAI(systemTextComment, userTextComment, apiKey);
+}
+
+/**
+ * Make OpenAI API call
+ */
+function callOpenAI(systemText, userText, apiKey) {
+  // Prepare the OpenAI API request
+  // Use simple string content format (most compatible)
+  const messages = [
+    {
+      role: 'system',
+      content: systemText
+    },
+    {
+      role: 'user',
+      content: userText
+    }
+  ];
+  
+  // Try to add file attachment if BRAND_FILE_ID is set and model supports it
+  // Note: File attachments only work with certain models (gpt-4o, gpt-4-turbo, etc.)
+  // If the model doesn't support it, the API will return an error
+  // We'll catch that error and retry without attachments
+  let payload = {
+    model: OPENAI_MODEL,
+    messages: messages
+  };
+  
+  // Attempt with file attachment if available (only for compatible models)
+  // Note: File attachments are supported by gpt-4o and gpt-4-turbo, but NOT gpt-4o-mini
+  if (BRAND_FILE_ID && BRAND_FILE_ID.trim()) {
+    try {
+      // Only use attachments for models that explicitly support them
+      // gpt-4o-mini does NOT support file attachments, so we skip it
+      // gpt-4o, gpt-5 and newer models support file attachments
+      const modelSupportsAttachments = (OPENAI_MODEL === 'gpt-5' ||
+                                        OPENAI_MODEL.startsWith('gpt-5') ||
+                                        OPENAI_MODEL === 'gpt-4o' || 
+                                        OPENAI_MODEL === 'gpt-4-turbo' ||
+                                        OPENAI_MODEL.startsWith('gpt-4o-') ||
+                                        OPENAI_MODEL.startsWith('gpt-4-turbo-') ||
+                                        OPENAI_MODEL.includes('o1'));
+      
+      if (modelSupportsAttachments) {
+        payload.messages[0] = {
+          role: 'system',
+          content: [
+            {
+              type: 'text',
+              text: systemText
+            }
+          ],
+          attachments: [
+            {
+              file_id: BRAND_FILE_ID.trim()
+            }
+          ]
+        };
+        console.log('Using file attachment for model:', OPENAI_MODEL);
+      } else {
+        console.log('Model ' + OPENAI_MODEL + ' does not support file attachments, using text-only content');
+      }
+    } catch (e) {
+      // If attachment setup fails, continue without it
+      console.warn('Could not set up file attachment, continuing without it:', e);
+    }
+  }
+
+  // Make the API call
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'Authorization': 'Bearer ' + apiKey
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  let response = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', options);
+  let responseCode = response.getResponseCode();
+  let responseText = response.getContentText();
+
+  // If request failed and we used file attachments, retry without attachments
+  if (responseCode >= 400 && payload.messages[0].attachments) {
+    console.warn('API call with file attachment failed, retrying without attachment...');
+    // Retry with simple text content
+    payload.messages[0] = {
+      role: 'system',
+      content: systemText
+    };
+    delete payload.messages[0].attachments;
+    options.payload = JSON.stringify(payload);
+    response = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', options);
+    responseCode = response.getResponseCode();
+    responseText = response.getContentText();
+  }
+
+  if (responseCode < 200 || responseCode >= 300) {
+    const errorDetails = responseText.length > 500 ? responseText.substring(0, 500) + '...' : responseText;
+    throw new Error(`OpenAI API error ${responseCode}: ${errorDetails}`);
+  }
+
+  let json;
+  try {
+    json = JSON.parse(responseText);
+  } catch (e) {
+    throw new Error('Invalid JSON response from OpenAI: ' + responseText.substring(0, 200));
+  }
+  
+  // Extract the generated text from the response
+  const generatedText = json?.choices?.[0]?.message?.content || '';
+  
+  if (!generatedText) {
+    const errorInfo = json?.error ? JSON.stringify(json.error) : 'Unknown error';
+    throw new Error('No text generated from OpenAI. Response: ' + errorInfo);
+  }
+
+  return generatedText.trim();
+}
+
+/**
+ * Calculate savings amount from original and sale prices
+ */
+function computeSavings(original, sale) {
+  try {
+    const orig = parseFloat(String(original).replace(/[^0-9.]/g, ''));
+    const sal = parseFloat(String(sale).replace(/[^0-9.]/g, ''));
+    if (isFinite(orig) && isFinite(sal) && orig > sal) {
+      return (Math.round((orig - sal) * 100) / 100).toFixed(2);
+    }
+  } catch (e) {
+    // Ignore parsing errors
+  }
+  return '';
+}
+
+/**
+ * Truncate text to max length
+ */
+function truncate(text, maxLength) {
+  text = String(text || '');
+  if (text.length <= maxLength) return text;
+  return text.substring(0, maxLength - 3) + '...';
+}
+
+/**
+ * Return JSON response
+ */
+function _json(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Test function - you can run this manually to test the OpenAI connection
+ */
+function testOpenAI() {
+  try {
+    const testData = {
+      title: 'Test Product',
+      description: 'This is a test product description',
+      originalPrice: '99.99',
+      salePrice: '49.99',
+      discountPercent: '50',
+      category: 'Electronics'
+    };
+    const promo = generatePromoText(testData);
+    console.log('Test promo text:', promo);
+    return promo;
+  } catch (e) {
+    console.error('Test failed:', e);
+    throw e;
+  }
+}
