@@ -283,6 +283,7 @@ function doPost(e) {
 
         firstComment = firstComment ? `${firstComment}\n\n${linkBlock}` : linkBlock;
       }
+
     } catch (promoError) {
       console.error('Error generating comment text:', promoError);
       promoText = 'Error generating comment text: ' + promoError.message;
@@ -293,6 +294,9 @@ function doPost(e) {
         firstComment = promoText;
       }
     }
+
+    // Remove all-caps styling from the promo text while preserving URLs
+    promoText = lowercaseOutsideUrls(promoText);
 
     // Prepare row data in the correct column order
     const row = [
@@ -564,6 +568,29 @@ function _json(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Lowercase text while preserving any URLs
+ */
+function lowercaseOutsideUrls(text) {
+  if (!text) return '';
+
+  const urlRegex = /https?:\/\/[^\s)]+/gi;
+  const urls = [];
+
+  const placeholderText = text.replace(urlRegex, (match) => {
+    const placeholder = `__URL_PLACEHOLDER_${urls.length}__`;
+    urls.push(match);
+    return placeholder;
+  });
+
+  const lowercased = placeholderText.toLowerCase();
+
+  return lowercased.replace(/__URL_PLACEHOLDER_(\d+)__/g, (_, index) => {
+    const i = parseInt(index, 10);
+    return Number.isInteger(i) && urls[i] ? urls[i] : '';
+  });
 }
 
 /**
