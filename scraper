@@ -113,6 +113,10 @@ function createLinktShortLink(longUrl) {
   }
 }
 
+function escapeRegExp(str) {
+  return String(str).replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+}
+
 /**
  * Save a remote image to Drive and return its shareable URL
  */
@@ -247,12 +251,37 @@ function doPost(e) {
       
       // Replace [Amazon Link] placeholder with actual Linkt.w deep link if present
       if (finalLinktUrl && finalLinktUrl.trim()) {
+        const trimmedLink = finalLinktUrl.trim();
+        const amazonUrlRegex = /https?:\/\/(?:www\.)?amazon\.[^\s)]+/gi;
+
         if (promoText) {
-          promoText = promoText.replace(/\[Amazon Link\]/gi, finalLinktUrl.trim());
+          promoText = promoText
+            .replace(/\[Amazon Link\]/gi, trimmedLink)
+            .replace(amazonUrlRegex, trimmedLink);
         }
         if (firstComment) {
-          firstComment = firstComment.replace(/\[Amazon Link\]/gi, finalLinktUrl.trim());
+          firstComment = firstComment
+            .replace(/\[Amazon Link\]/gi, trimmedLink)
+            .replace(amazonUrlRegex, trimmedLink);
         }
+
+        // If the model inserted a different URL (or no placeholder at all),
+        // force the trusted Linkt.w deep link into the comment so the sheet
+        // always gets the correct tracking link.
+        const linkBlock = `${trimmedLink}`;
+        const linkBlockPattern = new RegExp(`${escapeRegExp(trimmedLink)}(?:\n\(𝐀𝐟𝐟𝐢𝐥𝐢𝐚𝐭𝐞𝐝 𝐥𝐢𝐧𝐤\))?`, 'gi');
+
+        // Remove any existing link blocks (including Amazon URLs) so we only keep one clean Linkt.w block
+        if (firstComment) {
+          firstComment = firstComment
+            .replace(linkBlockPattern, '')
+            .replace(amazonUrlRegex, '')
+            .replace(/\(𝐀𝐟𝐟𝐢𝐥𝐢𝐚𝐭𝐞𝐝 𝐥𝐢𝐧𝐤\)/gi, '')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+        }
+
+        firstComment = firstComment ? `${firstComment}\n\n${linkBlock}` : linkBlock;
       }
     } catch (promoError) {
       console.error('Error generating comment text:', promoError);
@@ -260,7 +289,7 @@ function doPost(e) {
       firstComment = promoText;
       // Still try to append Linkt.w link even if generation failed
       if (finalLinktUrl && finalLinktUrl.trim()) {
-        promoText = promoText + '\n\n👉 Click here to grab your set now: ' + finalLinktUrl.trim() + '\n(𝐀𝐟𝐟𝐢𝐥𝐢𝐚𝐭𝐞𝐝 𝐥𝐢𝐧𝐤)';
+        promoText = promoText + '\n\n👉 To grab your set now: ' + finalLinktUrl.trim();
         firstComment = promoText;
       }
     }
@@ -337,7 +366,7 @@ function generatePostAndComment(data, saveAmount, totalDiscount, apiKey) {
  * Generate the main post with an exciting tagline (examples provided by user)
  */
 function generateMainPost(data, saveAmount, totalDiscount, apiKey) {
-  const systemTextMain = 'You are Captain Deals USA, an electric, emoji-loving deal hunter. Create a SHORT Facebook post (max 3 lines) that follows this exact structure:\nLine 1: ATTENTION-GRABBING TAGLINE with one or two words in all caps with emojis before and after (e.g., \"⭐🏆The best power bank!🏆⭐ Small but mighty‼😜\" or \"🛑Alert🛑\"). Combine emojis + hype + brief descriptor.\nLine 2: Highlight the key benefit/discount/price with emojis (e.g., \"20 000mAh, Fast Charging 22.5W⚡ 😱🔥\" or \"43% OFF slushie machine\"). Include price or savings numbers if available.\nLine 3: CTA using either \"SEE DETAILS 👇👇👇\" or \"Link in comments\" (choose whichever fits best based on provided info).\nMake it fun, bold, and irresistible. Do NOT repeat the product title verbatim—be creative.';
+  const systemTextMain = 'You are Captain Deals USA, an electric, emoji-loving deal hunter. Create a SHORT Facebook post (max 3 lines) that follows this exact structure:\nLine 1: ATTENTION-GRABBING TAGLINE with only one word in all caps with emojis before and after (e.g., "⭐🏆The best power bank!🏆⭐ Small but mighty‼😜" or "🛑Alert🛑"). Combine emojis + hype + brief descriptor, but never write the entire post in all caps—only the tagline emphasis.\nLine 2: Highlight the key benefit/discount/price with emojis (e.g., "20 000mAh, Fast Charging 22.5W⚡ 😱🔥" or "43% OFF slushie machine"). Include price or savings numbers if available.\nLine 3: CTA using either "SEE DETAILS 👇👇👇" or "Link in comments" (choose whichever fits best based on provided info).\nMake it fun, bold, and irresistible. Do NOT repeat the product title verbatim—be creative.\nRules: Do NOT flood with link posts; avoid spammy phrases like "Click here!! Buy now!! Flash sale!!"; do NOT use shortened URLs such as bit.ly (use full URLs like URLgenius or JotURL); do NOT mention "Amazon affiliate" or "sponsored" copy-paste disclaimers.'
 
   const userTextMain =
     `Product Title: ${data.title}\n` +
@@ -358,7 +387,7 @@ function generateMainPost(data, saveAmount, totalDiscount, apiKey) {
  * Generate the detailed first comment with discount, price, features, and link
  */
 function generateDetailedComment(data, saveAmount, totalDiscount, apiKey) {
-  const systemTextComment = 'You are Captain Deals USA. Write a detailed first comment for a Facebook post using this exact structure:\n\n"Discount : [base discount or total discount]%\n[Second line: highlight extra savings, checkout note, or final price with an emoji (e.g., \"🟢49% OFF At CHECKOUT\" or \"💰 Only $8 today\")]\n\n----------------------------------\n\n[5 bullet points with emojis highlighting key features/benefits, one per line]\n\n----------------------------------\n\n👀 Switch your view to \"All comments\" instead of "Most relevant" to catch all deals.\n\n[Amazon Link]\n(𝐀𝐟𝐟𝐢𝐥𝐢𝐚𝐭𝐞𝐝 𝐥𝐢𝐧𝐤)"\n\nRules:\n- Use the provided pricing/discount info when filling in the first two lines.\n- Bullets must be concise, value-driven, and each start with a relevant emoji.\n- Keep tone energetic but trustworthy.\n- NEVER insert a blank line between the Amazon Link and the (affiliated link) line.';
+  const systemTextComment = 'You are Captain Deals USA. Write a detailed first comment for a Facebook post using this exact structure:\n\n"Discount : [base discount or total discount]%\n[Second line: highlight extra savings, checkout note, or final price with an emoji (e.g., "🟢49% OFF At CHECKOUT" or "💰 Only $8 today")]\n\n----------------------------------\n\n[5 bullet points with emojis highlighting key features/benefits, one per line]\n\n----------------------------------\n\n👀 Switch your view to "All comments" instead of "Most relevant" to catch all deals.\n\n[Amazon Link]\nI may earn a small commission if you buy through this link, at no extra cost."\n\nRules:\n- Use the provided pricing/discount info when filling in the first two lines.\n- Bullets must be concise, value-driven, and each start with a relevant emoji.\n- Keep tone energetic but trustworthy.\n- NEVER insert a blank line between the Amazon Link and the commission note.\n- Do NOT flood with link posts; avoid spammy phrases like "Click here!! Buy now!! Flash sale!!"; do NOT use shortened URLs such as bit.ly (use full URLs like URLgenius or JotURL); do NOT mention "Amazon affiliate" or "sponsored" copy-paste disclaimers.'
 
   const priceLine = data.couponAmount
     ? `💰 Checkout Price: $${data.couponAmount}`
